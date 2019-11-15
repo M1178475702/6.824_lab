@@ -119,19 +119,28 @@ func makeInputs(num int) []string {
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp. can't use current directory since
 // AFS doesn't support UNIX-domain sockets.
+
+var i = 1
+
 func port(suffix string) string {
-	s := "/var/tmp/824-"
-	s += strconv.Itoa(os.Getuid()) + "/"
-	os.Mkdir(s, 0777)
-	s += "mr"
-	s += strconv.Itoa(os.Getpid()) + "-"
-	s += suffix
-	return s
+	temp := i
+	i++
+	return fmt.Sprintf("127.0.0.1:%d", 4000+temp)
+
+	//
+	//s := "/var/tmp/824-"
+	//s += strconv.Itoa(os.Getuid()) + "/"
+	//os.Mkdir(s, 0777)
+	//s += "mr"
+	//s += strconv.Itoa(os.Getpid()) + "-"
+	//s += suffix
+	//return s
 }
 
 func setup() *Master {
 	files := makeInputs(nMap)
 	master := port("master")
+
 	mr := Distributed("test", files, nReduce, master)
 	return mr
 }

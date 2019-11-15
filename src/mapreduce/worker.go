@@ -76,13 +76,15 @@ func RunWorker(MasterAddress string, me string,
 	rpcs := rpc.NewServer()
 	rpcs.Register(wk)
 	os.Remove(me) // only needed for "unix"
-	l, e := net.Listen("unix", me)
+	//l, e := net.Listen("unix", me)
+	l, e := net.Listen("tcp", me)
+
 	if e != nil {
 		log.Fatal("RunWorker: worker ", me, " error: ", e)
 	}
 	wk.l = l
 	wk.register(MasterAddress)
-
+	//TODO RPC 一次请求 一个链接
 	// DON'T MODIFY CODE BELOW
 	for {
 		wk.Lock()

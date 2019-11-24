@@ -14,11 +14,11 @@ package labrpc
 // don't include references to program objects.
 //
 // net := MakeNetwork() -- holds network, clients, servers.
-// end := net.MakeEnd(endname) -- create a client end-point, to talk to one server.
+// end := net.MakeEnd(Endname) -- create a client end-point, to talk to one server.
 // net.AddServer(servername, server) -- adds a named server to network.
 // net.DeleteServer(servername) -- eliminate the named server.
-// net.Connect(endname, servername) -- connect a client to a server.
-// net.Enable(endname, enabled) -- enable/disable a client.
+// net.Connect(Endname, servername) -- connect a client to a server.
+// net.Enable(Endname, enabled) -- enable/disable a client.
 // net.Reliable(bool) -- false means drop/delay messages
 //
 // end.Call("Raft.AppendEntries", &args, &reply) -- send an RPC, wait for reply.
@@ -48,7 +48,9 @@ package labrpc
 //   pass svc to srv.AddService()
 //
 
-import "encoding/gob"
+import (
+	"encoding/gob"
+)
 import "bytes"
 import "reflect"
 import "sync"
@@ -71,7 +73,7 @@ type replyMsg struct {
 }
 
 type ClientEnd struct {
-	endname interface{} // this end-point's name
+	Endname interface{} // this end-point's name
 	ch      chan reqMsg // copy of Network.endCh
 }
 
@@ -80,7 +82,7 @@ type ClientEnd struct {
 // server couldn't be contacted.
 func (e *ClientEnd) Call(svcMeth string, args interface{}, reply interface{}) bool {
 	req := reqMsg{}
-	req.endname = e.endname
+	req.endname = e.Endname
 	req.svcMeth = svcMeth
 	req.argsType = reflect.TypeOf(args)
 	req.replyCh = make(chan replyMsg)
@@ -91,7 +93,7 @@ func (e *ClientEnd) Call(svcMeth string, args interface{}, reply interface{}) bo
 	req.args = qb.Bytes()
 
 	e.ch <- req
-
+	//TODO 接收处设置最小时延
 	rep := <-req.replyCh
 	if rep.ok {
 		rb := bytes.NewBuffer(rep.reply)
@@ -113,7 +115,7 @@ type Network struct {
 	ends           map[interface{}]*ClientEnd  // ends, by name
 	enabled        map[interface{}]bool        // by end name
 	servers        map[interface{}]*Server     // servers, by name
-	connections    map[interface{}]interface{} // endname -> servername
+	connections    map[interface{}]interface{} // Endname -> servername
 	endCh          chan reqMsg
 }
 
@@ -157,6 +159,7 @@ func (rn *Network) LongDelays(yes bool) {
 	rn.longDelays = yes
 }
 
+//读取end，server信息时，因为end，server会实时变动，所以需要锁
 func (rn *Network) ReadEndnameInfo(endname interface{}) (enabled bool,
 	servername interface{}, server *Server, reliable bool, longreordering bool,
 ) {
@@ -187,6 +190,7 @@ func (rn *Network) ProcessReq(req reqMsg) {
 	enabled, servername, server, reliable, longreordering := rn.ReadEndnameInfo(req.endname)
 
 	if enabled && servername != nil && server != nil {
+		//当reliable为false时，不可靠，，模拟短延时
 		if reliable == false {
 			// short delay
 			ms := (rand.Int() % 27)
@@ -205,7 +209,9 @@ func (rn *Network) ProcessReq(req reqMsg) {
 		// failure reply.
 		ech := make(chan replyMsg)
 		go func() {
+			//在线程中，向server分发请求
 			r := server.dispatch(req)
+			//收到请求，通过channel通知network，由network做后续处理
 			ech <- r
 		}()
 
@@ -215,11 +221,13 @@ func (rn *Network) ProcessReq(req reqMsg) {
 		var reply replyMsg
 		replyOK := false
 		serverDead := false
+		//超时race
 		for replyOK == false && serverDead == false {
 			select {
 			case reply = <-ech:
 				replyOK = true
 			case <-time.After(100 * time.Millisecond):
+				//TODO 超时，检查server或者client是否dead,然后继续轮询
 				serverDead = rn.IsServerDead(req.endname, servername, server)
 			}
 		}
@@ -227,16 +235,16 @@ func (rn *Network) ProcessReq(req reqMsg) {
 		// do not reply if DeleteServer() has been called, i.e.
 		// the server has been killed. this is needed to avoid
 		// situation in which a client gets a positive reply
-		// to an Append, but the server persisted the update
-		// into the old Persister. config.go is careful to call
+		// to an Append, TODO but the server persisted the update into the old Persister. WHY?
+		//  config.go is careful to call
 		// DeleteServer() before superseding the Persister.
 		serverDead = rn.IsServerDead(req.endname, servername, server)
 
 		if replyOK == false || serverDead == true {
 			// server was killed while we were waiting; return error.
 			req.replyCh <- replyMsg{false, nil}
-		} else if reliable == false && (rand.Int()%1000) < 100 {
-			// drop the reply, return as if timeout
+		} else if reliable == false && (rand.Int()%1000) < 100 { //随机数，测试随机出现超时情况
+			// drop the reply, return as if timeout //TODO 可是server可能已经持久化过，但却判为无效，一致性问题
 			req.replyCh <- replyMsg{false, nil}
 		} else if longreordering == true && rand.Intn(900) < 600 {
 			// delay the response for a while
@@ -275,7 +283,7 @@ func (rn *Network) MakeEnd(endname interface{}) *ClientEnd {
 	}
 
 	e := &ClientEnd{}
-	e.endname = endname
+	e.Endname = endname
 	e.ch = rn.endCh
 	rn.ends[endname] = e
 	rn.enabled[endname] = false
@@ -362,6 +370,7 @@ func (rs *Server) dispatch(req reqMsg) replyMsg {
 	rs.mu.Unlock()
 
 	if ok {
+		//TODO  改成线程执行？
 		return service.dispatch(methodName, req)
 	} else {
 		choices := []string{}
@@ -420,6 +429,7 @@ func MakeService(rcvr interface{}) *Service {
 	return svc
 }
 
+//dispatch 在server线程（进程）同步的执行，没有用线程异步
 func (svc *Service) dispatch(methname string, req reqMsg) replyMsg {
 	if method, ok := svc.methods[methname]; ok {
 		// prepare space into which to read the argument.

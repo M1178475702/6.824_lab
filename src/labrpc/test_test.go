@@ -87,7 +87,7 @@ func TestBasic(t *testing.T) {
 
 func TestTypes(t *testing.T) {
 	runtime.GOMAXPROCS(4)
-
+	//注册机，调度器
 	rn := MakeNetwork()
 
 	e := rn.MakeEnd("end1-99")
@@ -98,7 +98,7 @@ func TestTypes(t *testing.T) {
 	rs := MakeServer()
 	rs.AddService(svc)
 	rn.AddServer("server99", rs)
-
+	//TODO 由network手动指定end链接到那个server，而不是根据server + service动态确定链接哪个server。。有点
 	rn.Connect("end1-99", "server99")
 	rn.Enable("end1-99", true)
 
@@ -124,7 +124,7 @@ func TestTypes(t *testing.T) {
 }
 
 //
-// does net.Enable(endname, false) really disconnect a client?
+// does net.Enable(Endname, false) really disconnect a client?
 //
 func TestDisconnect(t *testing.T) {
 	runtime.GOMAXPROCS(4)
@@ -145,6 +145,7 @@ func TestDisconnect(t *testing.T) {
 	{
 		reply := ""
 		e.Call("JunkServer.Handler2", 111, &reply)
+		//wrong reply will be ""
 		if reply != "" {
 			t.Fatalf("unexpected reply from Handler2")
 		}
@@ -196,7 +197,7 @@ func TestCounts(t *testing.T) {
 	}
 }
 
-//
+//.
 // test RPCs from concurrent ClientEnds
 //
 func TestConcurrentMany(t *testing.T) {
@@ -229,6 +230,7 @@ func TestConcurrentMany(t *testing.T) {
 				reply := ""
 				e.Call("JunkServer.Handler2", arg, &reply)
 				wanted := "handler2-" + strconv.Itoa(arg)
+				fmt.Println(time.Now().Nanosecond())
 				if reply != wanted {
 					t.Fatalf("wrong reply %v from Handler1, expecting %v", reply, wanted)
 				}
@@ -285,6 +287,7 @@ func TestUnreliable(t *testing.T) {
 			reply := ""
 			ok := e.Call("JunkServer.Handler2", arg, &reply)
 			if ok {
+				//ok的情况下，reply一定是正常的。。。
 				wanted := "handler2-" + strconv.Itoa(arg)
 				if reply != wanted {
 					t.Fatalf("wrong reply %v from Handler1, expecting %v", reply, wanted)
@@ -476,7 +479,7 @@ func TestKilled(t *testing.T) {
 	}
 
 	rn.DeleteServer("server99")
-
+	//本来执行需要20s。因为delete，导致提前返回失败
 	select {
 	case x := <-doneCh:
 		if x != false {

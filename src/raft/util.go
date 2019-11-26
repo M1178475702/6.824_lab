@@ -1,8 +1,12 @@
 package raft
 
 import (
+	"bytes"
 	"log"
 	"math/rand"
+	"runtime"
+	"strconv"
+	"time"
 )
 
 // Debugging
@@ -15,8 +19,19 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
+var myRand = rand.New(rand.NewSource(int64(time.Now().Nanosecond())))
+
 func randInt(b, s int) (r int) {
-	r = rand.Intn(s - b)
+	r = myRand.Intn(s - b)
 	r += b
 	return r
+}
+
+func GetGID() uint64 {
+	b := make([]byte, 64)
+	b = b[:runtime.Stack(b, false)]
+	b = bytes.TrimPrefix(b, []byte("goroutine "))
+	b = b[:bytes.IndexByte(b, ' ')]
+	n, _ := strconv.ParseUint(string(b), 10, 64)
+	return n
 }

@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"encoding/gob"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 import "labrpc"
@@ -45,9 +46,17 @@ type ApplyMsg struct {
 //
 
 type Log struct {
-	Command string
+	Command interface{}
 	Term    int
 }
+
+type Role int
+
+const (
+	Follower  Role = 1
+	Candidate Role = 2
+	Leader    Role = 3
+)
 
 type Raft struct {
 	mu        sync.Mutex
@@ -63,14 +72,18 @@ type Raft struct {
 	votedFor    int
 	log         []Log
 
+	state Role //1 follower 2 candidate 3 leader
+
 	commitIndex int
 	lastApplied int
 
 	nextIndex  []int
 	matchIndex []int
 
-	aeCh chan int //AppendEntries channel
-	hbCh chan int //heartbeat channel
+	appendEntriesCh    chan int  //AppendEntries channel, just used for notify receiving message
+	recvHbWhenLeaderCh chan int  //receive heartbeat when leader channel, it means self is a old leader
+	electionCh         chan bool //用于通知选举结果
+	applyCh            chan ApplyMsg
 }
 
 // return currentTerm and whether this server
@@ -233,6 +246,12 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 }
 
+func (rf *Raft) changeState(state Role) {
+	rf.mu.Lock()
+	rf.state = state
+	rf.mu.Unlock()
+}
+
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -259,63 +278,78 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 
-	rf.leaderId = -1
-	rf.aeCh = make(chan int)
-
 	rf.matchIndex = make([]int, 0, len(rf.peers))
 	rf.nextIndex = make([]int, 0, len(rf.peers))
+
+	rf.appendEntriesCh = make(chan int)
+	rf.electionCh = make(chan bool)
+	rf.recvHbWhenLeaderCh = make(chan int)
+	rf.applyCh = applyCh
+
+	rf.leaderId = -1
+	rf.state = Follower
+
 	//do election
 	go func() {
 		//first wait AppendEntries request without empty Entries for a timeout
 		for {
-			timeout := randInt(150, 300)
-			timer := time.NewTimer(time.Duration(timeout) * time.Millisecond)
-			select {
-			case f := <-rf.aeCh:
-				//reset random election timeout
-				_, _ = DPrintf("%d recv msg from %d, at %d", rf.me, f, time.Now().Nanosecond())
-				break
-			case <-timer.C:
-				//election
-				_, _ = DPrintf("%d start election, timeout is %d, now is %d", rf.me, timeout, time.Now().Nanosecond())
-				isLeader := rf.election()
-				if isLeader {
-					t := time.NewTicker(time.Duration(50) * time.Millisecond)
-					//如何自己知道自己已经断开链接，停止继续发送心跳包？
-				loop1:
-					for {
-						//使用无阻塞管道进行轮询
-						select {
-						case <-rf.hbCh:
-							break loop1
-						default:
-							<-t.C
-							rf.sendHeartbeat()
-						}
-					}
-				} else {
-					rf.votedFor = -1
+			rf.mu.Lock()
+			state := rf.state //使用局部变量，减小锁的粒度
+			rf.mu.Unlock()
 
+			switch state {
+			case Follower:
+				select {
+				case <-rf.appendEntriesCh: //follower state
+					//_, _ = DPrintf("%d recv msg from %d, at %d", rf.me, f, time.Now().Nanosecond())
+				case <-time.After(time.Duration(randInt(150, 300)) * time.Millisecond):
+					rf.changeState(Candidate)
 				}
+			case Candidate:
+				//start election
+			loop:
+				for {
+					_, _ = DPrintf("%d start election, at %v", rf.me, time.Now().UnixNano()/1e6)
+					isLeader := rf.election()
+					if isLeader {
+						rf.changeState(Leader)
+						rf.leaderId = rf.me
+						break loop
+					} else {
+						rf.votedFor = -1
+					}
+					select {
+					case <-rf.appendEntriesCh:
+						rf.changeState(Follower)
+						break loop
+					case <-time.After(time.Duration(randInt(150, 300)) * time.Millisecond):
+
+					}
+				}
+			case Leader:
+				rf.leaderState()
 			}
 		}
-
 	}()
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
 	return rf
 }
 
 func (rf *Raft) election() bool {
+	rf.mu.Lock()
 	rf.leaderId = -1
 	rf.currentTerm++
 	rf.votedFor = rf.me
-	voteCount := 1
-	vch := make(chan int)
+	rf.mu.Unlock()
+	voteCount := int32(1)
+	winNeedCount := int32(len(rf.peers)/2) + 1
+	recvCount := int32(0)
+	lenPeers := int32(len(rf.peers))
 	for i := range rf.peers {
 		if i != rf.me {
 			go func(i int) {
+				//放在主线程，不用加锁？
 				var lastLogTerm int
 				if rf.commitIndex == 0 {
 					lastLogTerm = 0
@@ -329,41 +363,61 @@ func (rf *Raft) election() bool {
 					LastLogTerm:  lastLogTerm,
 				}
 				reply := new(RequestVoteReply)
+				//_, _ = DPrintf("%d request vote for %d at %v, gid %d", rf.me, i, time.Now().UnixNano()/1e6, GetGID())
 				ok := rf.sendRequestVote(i, args, reply)
+				//_, _ = DPrintf("%d request vote for %d, network ok ? : %t at %v, gid %d", rf.me, i, ok, time.Now().UnixNano()/1e6, GetGID())
+				atomic.AddInt32(&recvCount, 1)
 				if ok {
-					rf.mu.Lock()
 					if reply.VoteGranted {
-						voteCount++
+						atomic.AddInt32(&voteCount, 1)
+						//大于不用任何其他处理
+						if atomic.LoadInt32(&voteCount) == winNeedCount {
+							rf.electionCh <- true
+						} else if atomic.LoadInt32(&recvCount) == lenPeers-1 && atomic.LoadInt32(&voteCount) < winNeedCount {
+							rf.electionCh <- false
+						}
 					} else if reply.Term != 0 {
+						rf.mu.Lock()
 						rf.currentTerm = reply.Term
+						rf.mu.Unlock()
 					}
-					rf.mu.Unlock()
+				} else {
+					if atomic.LoadInt32(&recvCount) == lenPeers-1 && atomic.LoadInt32(&voteCount) < winNeedCount {
+						rf.electionCh <- false
+					}
 				}
-				vch <- i
 			}(i)
 		}
+	}
+
+	select {
+	case isLeader := <-rf.electionCh:
+		_, _ = DPrintf("%d vote result %t at %v", rf.me, isLeader, time.Now().UnixNano()/1e6)
+		return isLeader
+	case <-time.After(time.Duration(300) * time.Millisecond):
+		//TODO 必须针对，长时延的投票返回做检查手段
+		return false
+	case <-rf.appendEntriesCh:
+		return false
 
 	}
-	recvCount := 0
+
+	//可能没有选举出领导，在选择适当的timeout 之后重新开始
+}
+
+func (rf *Raft) leaderState() {
+	//in the begin, send heartbeat immediately
+	rf.sendHeartbeat()
+	t := time.NewTicker(time.Duration(50) * time.Millisecond)
+	//如何自己知道自己已经断开链接，停止继续发送心跳包？
 loop:
 	for {
 		select {
-		case <-vch:
-			recvCount++
-			if recvCount == len(rf.peers)-1 {
-				break loop
-			}
-		case <-rf.aeCh:
-			return false
+		case <-rf.recvHbWhenLeaderCh: //如果中途收到心跳，说明新的领导已经产生
+			rf.changeState(Follower)
+			break loop
+		case <-t.C:
+			rf.sendHeartbeat()
 		}
 	}
-	_, _ = DPrintf("%d election result %d", rf.me, voteCount)
-	if voteCount > len(rf.peers)/2 {
-		rf.leaderId = rf.me
-		rf.sendHeartbeat()
-		return true
-	} else {
-		return false
-	}
-	//可能没有选举出领导，在选择适当的timeout 之后重新开始
 }

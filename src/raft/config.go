@@ -375,9 +375,9 @@ func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 // it might choose the wrong leader initially,
 // and have to re-submit after giving up.
 // entirely gives up after about 10 seconds.
-// indirectly checks that the servers agree on the
-// same value, since nCommitted() checks this,
-// as do the threads that read from applyCh.
+// indirectly checks that the servers agree on the same value, since nCommitted() checks this,as do the threads that read from applyCh.
+//
+//
 // returns index.
 func (cfg *config) one(cmd int, expectedServers int) int {
 	t0 := time.Now()
@@ -403,8 +403,8 @@ func (cfg *config) one(cmd int, expectedServers int) int {
 		}
 
 		if index != -1 {
-			// somebody claimed to be the leader and to have
-			// submitted our Command; wait a while for agreement.
+			// somebody claimed to be the leader and to have submitted our Command; wait a while for agreement.
+			//
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)

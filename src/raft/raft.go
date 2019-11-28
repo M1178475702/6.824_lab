@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"algorithm"
 	"bytes"
 	"encoding/gob"
 	"sync"
@@ -84,6 +85,10 @@ type Raft struct {
 	recvHbWhenLeaderCh chan int  //receive heartbeat when leader channel, it means self is a old leader
 	electionCh         chan bool //用于通知选举结果
 	applyCh            chan ApplyMsg
+
+	isAppending []bool
+
+	applyQueue algorithm.Queue
 }
 
 // return currentTerm and whether this server
@@ -229,9 +234,13 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
+	index := len(rf.log)
+	term := rf.currentTerm
+	isLeader := rf.leaderId == rf.me
+	if isLeader {
+		_, _ = DPrintf("%d call append log, index is %d", rf.me, rf.leaderId)
+		rf.appendLog(command)
+	}
 
 	return index, term, isLeader
 }
@@ -273,13 +282,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here.
 	rf.votedFor = -1
 	rf.currentTerm = 0
-	rf.log = *new([]Log)
+	rf.log = make([]Log, 1, 5)
+	rf.log[0] = Log{
+		Command: nil,
+		Term:    0,
+	}
 
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 
-	rf.matchIndex = make([]int, 0, len(rf.peers))
-	rf.nextIndex = make([]int, 0, len(rf.peers))
+	rf.matchIndex = make([]int, len(rf.peers))
+	rf.nextIndex = make([]int, len(rf.peers))
+	rf.isAppending = make([]bool, len(rf.peers))
 
 	rf.appendEntriesCh = make(chan int)
 	rf.electionCh = make(chan bool)
@@ -296,7 +310,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			rf.mu.Lock()
 			state := rf.state //使用局部变量，减小锁的粒度
 			rf.mu.Unlock()
-
 			switch state {
 			case Follower:
 				select {
@@ -408,6 +421,14 @@ func (rf *Raft) election() bool {
 func (rf *Raft) leaderState() {
 	//in the begin, send heartbeat immediately
 	rf.sendHeartbeat()
+	//init nextIndex, matchIndex
+	for i := range rf.nextIndex {
+		if i == rf.me {
+			continue
+		}
+		rf.nextIndex[i] = len(rf.log)
+		rf.matchIndex[i] = 0
+	}
 	t := time.NewTicker(time.Duration(50) * time.Millisecond)
 	//如何自己知道自己已经断开链接，停止继续发送心跳包？
 loop:
